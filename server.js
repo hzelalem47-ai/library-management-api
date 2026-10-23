@@ -1,37 +1,15 @@
 
+require("dotenv").config();
+
 const express = require("express");
+const mongoose = require("mongoose");
+const Book = require("./models/Book");
 
 const app = express();
-const PORT = 3000;
 
-// Middleware: allows Express to read JSON request bodies
 app.use(express.json());
 
-// Temporary book storage
-let books = [
-  {
-    id: 1,
-    title: "Atomic Habits",
-    author: "James Clear",
-    year: 2018
-  },
-  {
-    id: 2,
-    title: "Rich Dad Poor Dad",
-    author: "Robert Kiyosaki",
-    year: 1997
-  },
-  {
-    id: 3,
-    title: "The Alchemist",
-    author: "Paulo Coelho",
-    year: 1988
-  }
-];
-
-let nextId = 4;
-
-// Authentication middleware
+// Librarian authorization
 function librarianOnly(req, res, next) {
   if (req.query.role !== "librarian") {
     return res.status(403).json({
@@ -43,168 +21,201 @@ function librarianOnly(req, res, next) {
   next();
 }
 
-// Home route
+// Welcome route
 app.get("/", (req, res) => {
   res.status(200).json({
     message: "Welcome to the Library Management API"
   });
 });
 
-// GET: Read all books, with optional search
-app.get("/books", (req, res) => {
-  const { search } = req.query;
+// GET: Retrieve all books, with optional search
+app.get("/books", async (req, res) => {
+  try {
+    const filter = {};
 
-  let result = books;
+    if (req.query.search) {
+      const search = req.query.search;
 
-  if (search) {
-    result = books.filter(
-      book =>
-        book.title.toLowerCase().includes(search.toLowerCase()) ||
-        book.author.toLowerCase().includes(search.toLowerCase())
+      filter.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { author: { $regex: search, $options: "i" } }
+      ];
+    }
+
+    const books = await Book.find(filter);
+
+    res.status(200).json({
+      success: true,
+      count: books.length,
+      books
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// GET: Retrieve one book by MongoDB ID
+app.get("/books/:id", async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid book ID."
+      });
+    }
+
+    const book = await Book.findById(req.params.id);
+
+    if (!book) {
+      return res.status(404).json({
+        success: false,
+        message: "Book not found."
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      book
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// POST: Create a book
+app.post("/books", librarianOnly, async (req, res) => {
+  try {
+    const { title, author, year, genre, available } = req.body;
+
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      typeof author !== "string" ||
+      !author.trim() ||
+      !Number.isInteger(year) ||
+      year < 1 ||
+      typeof genre !== "string" ||
+      !genre.trim() ||
+      (available !== undefined && typeof available !== "boolean")
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide a valid title, author, year, genre, and optional boolean availability."
+      });
+    }
+
+    const book = await Book.create({
+      title,
+      author,
+      year,
+      genre,
+      available
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Book created successfully.",
+      book
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+});
+
+// PUT: Update a book
+app.put("/books/:id", librarianOnly, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid book ID."
+      });
+    }
+
+    const { title, author, year, genre, available } = req.body;
+
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      typeof author !== "string" ||
+      !author.trim() ||
+      !Number.isInteger(year) ||
+      year < 1 ||
+      typeof genre !== "string" ||
+      !genre.trim() ||
+      (available !== undefined && typeof available !== "boolean")
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide valid title, author, year, genre, and optional boolean availability."
+      });
+    }
+
+    const book = await Book.findByIdAndUpdate(
+      req.params.id,
+      { title, author, year, genre, available },
+      { new: true, runValidators: true }
     );
-  }
 
-  res.status(200).json({
-    success: true,
-    count: result.length,
-    books: result
-  });
+    if (!book) {
+      return res.status(404).json({
+        success: false,
+        message: "Book not found."
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Book updated successfully.",
+      book
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
 });
 
-// GET: Read one book by ID
-app.get("/books/:id", (req, res) => {
-  const id = Number(req.params.id);
+// DELETE: Delete a book
+app.delete("/books/:id", librarianOnly, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid book ID."
+      });
+    }
 
-  if (!Number.isInteger(id) || id < 1) {
-    return res.status(400).json({
+    const book = await Book.findByIdAndDelete(req.params.id);
+
+    if (!book) {
+      return res.status(404).json({
+        success: false,
+        message: "Book not found."
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Book deleted successfully.",
+      book
+    });
+  } catch (error) {
+    res.status(500).json({
       success: false,
-      message: "Book ID must be a positive integer."
+      message: error.message
     });
   }
-
-  const book = books.find(book => book.id === id);
-
-  if (!book) {
-    return res.status(404).json({
-      success: false,
-      message: "Book not found."
-    });
-  }
-
-  res.status(200).json({
-    success: true,
-    book
-  });
-});
-
-// POST: Create a book (librarian only)
-app.post("/books", librarianOnly, (req, res) => {
-  const { title, author, year } = req.body;
-
-  if (
-    typeof title !== "string" ||
-    !title.trim() ||
-    typeof author !== "string" ||
-    !author.trim() ||
-    !Number.isInteger(year) ||
-    year < 1
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: "Provide a valid title, author, and positive integer year."
-    });
-  }
-
-  const newBook = {
-    id: nextId++,
-    title: title.trim(),
-    author: author.trim(),
-    year
-  };
-
-  books.push(newBook);
-
-  res.status(201).json({
-    success: true,
-    message: "Book created successfully.",
-    book: newBook
-  });
-});
-
-// PUT: Update a book (librarian only)
-app.put("/books/:id", librarianOnly, (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!Number.isInteger(id) || id < 1) {
-    return res.status(400).json({
-      success: false,
-      message: "Book ID must be a positive integer."
-    });
-  }
-
-  const book = books.find(book => book.id === id);
-
-  if (!book) {
-    return res.status(404).json({
-      success: false,
-      message: "Book not found."
-    });
-  }
-
-  const { title, author, year } = req.body;
-
-  if (
-    typeof title !== "string" ||
-    !title.trim() ||
-    typeof author !== "string" ||
-    !author.trim() ||
-    !Number.isInteger(year) ||
-    year < 1
-  ) {
-    return res.status(400).json({
-      success: false,
-      message: "Provide a valid title, author, and positive integer year."
-    });
-  }
-
-  book.title = title.trim();
-  book.author = author.trim();
-  book.year = year;
-
-  res.status(200).json({
-    success: true,
-    message: "Book updated successfully.",
-    book
-  });
-});
-
-// DELETE: Delete a book (librarian only)
-app.delete("/books/:id", librarianOnly, (req, res) => {
-  const id = Number(req.params.id);
-
-  if (!Number.isInteger(id) || id < 1) {
-    return res.status(400).json({
-      success: false,
-      message: "Book ID must be a positive integer."
-    });
-  }
-
-  const index = books.findIndex(book => book.id === id);
-
-  if (index === -1) {
-    return res.status(404).json({
-      success: false,
-      message: "Book not found."
-    });
-  }
-
-  const deletedBook = books.splice(index, 1)[0];
-
-  res.status(200).json({
-    success: true,
-    message: "Book deleted successfully.",
-    book: deletedBook
-  });
 });
 
 // Handle unknown routes
@@ -225,7 +236,18 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Library API running at http://localhost:${PORT}`);
-});
+// Connect to MongoDB and start server
+const PORT = process.env.PORT || 3000;
+
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log("Connected to MongoDB Atlas");
+
+    app.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  })
+  .catch((error) => {
+    console.error("MongoDB connection failed:", error.message);
+  });
