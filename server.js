@@ -3,64 +3,235 @@ require("dotenv").config();
 
 const express = require("express");
 const mongoose = require("mongoose");
+const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+
 const Book = require("./models/Book");
+const Librarian = require("./models/Librarian");
+const authenticateLibrarian = require("./authMiddleware");
 
 const app = express();
+const authRouter = express.Router();
 
+const PORT = process.env.PORT || 3000;
+
+// ======================================
+// MIDDLEWARE
+// ======================================
+
+app.use(cors());
 app.use(express.json());
-
-// Librarian authorization
-function librarianOnly(req, res, next) {
-  if (req.query.role !== "librarian") {
-    return res.status(403).json({
-      success: false,
-      message: "Access denied. Librarian permission required."
-    });
-  }
-
+app.use((req, res, next) => {
+  console.log("REQUEST RECEIVED:", req.method, req.originalUrl);
+  console.log("REQUEST BODY:", req.body);
   next();
-}
+});
 
-// Welcome route
+// ======================================
+// HOME ROUTE
+// ======================================
+
 app.get("/", (req, res) => {
-  res.status(200).json({
-    message: "Welcome to the Library Management API"
+  res.json({
+    success: true,
+    message: "Welcome to Bookwise Library API!"
   });
 });
 
-// GET: Retrieve all books, with optional search
-app.get("/books", async (req, res) => {
+// ======================================
+// LIBRARIAN REGISTRATION
+// ======================================
+
+authRouter.post("/register", async (req, res) => {
   try {
-    const filter = {};
+    const { username, password, setupKey } = req.body;
 
-    if (req.query.search) {
-      const search = req.query.search;
-
-      filter.$or = [
-        { title: { $regex: search, $options: "i" } },
-        { author: { $regex: search, $options: "i" } }
-      ];
+    if (!username || !password || !setupKey) {
+      return res.status(400).json({
+        success: false,
+        message: "Username, password, and setup key are required."
+      });
     }
 
-    const books = await Book.find(filter);
+    if (setupKey !== process.env.LIBRARIAN_SETUP_KEY) {
+      return res.status(403).json({
+        success: false,
+        message: "Invalid librarian setup key."
+      });
+    }
 
-    res.status(200).json({
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must contain at least 8 characters."
+      });
+    }
+
+    const normalizedUsername = username.trim().toLowerCase();
+
+    const existingLibrarian = await Librarian.findOne({
+      username: normalizedUsername
+    });
+
+    if (existingLibrarian) {
+      return res.status(409).json({
+        success: false,
+        message: "Username already exists."
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const librarian = await Librarian.create({
+      username: normalizedUsername,
+      password: hashedPassword
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Librarian registered successfully.",
+      librarian: {
+        id: librarian._id,
+        username: librarian.username
+      }
+    });
+
+  } catch (error) {
+    console.error("Registration error:", error);
+
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "Username already exists."
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Registration failed."
+    });
+  }
+});
+
+// ======================================
+// LIBRARIAN LOGIN
+// ======================================
+
+authRouter.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Username and password are required."
+      });
+    }
+
+    const librarian = await Librarian.findOne({
+      username: username.trim().toLowerCase()
+    });
+
+    if (!librarian) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid username or password."
+      });
+    }
+
+    const passwordMatch = await bcrypt.compare(
+      password,
+      librarian.password
+    );
+
+    if (!passwordMatch) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid username or password."
+      });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is missing from .env");
+    }
+
+    const token = jwt.sign(
+      { librarianId: librarian._id.toString() },
+      process.env.JWT_SECRET,
+      { expiresIn: "2h" }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful.",
+      token,
+      librarian: {
+        id: librarian._id,
+        username: librarian.username
+      }
+    });
+
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Login failed."
+    });
+  }
+});
+
+// ======================================
+// MOUNT AUTHENTICATION ROUTES
+// ======================================
+
+app.use("/auth", authRouter);
+
+// ======================================
+// TEST AUTHENTICATION ROUTE
+// ======================================
+
+app.get("/auth/test", (req, res) => {
+  console.log("Authentication test route reached.");
+
+  res.status(200).json({
+    success: true,
+    message: "Authentication routes are mounted."
+  });
+});
+
+// ======================================
+// GET ALL BOOKS
+// ======================================
+
+app.get("/books", async (req, res) => {
+  try {
+    const books = await Book.find().sort({ createdAt: -1 });
+
+    return res.status(200).json({
       success: true,
       count: books.length,
       books
     });
+
   } catch (error) {
-    res.status(500).json({
+    console.error("Get books error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: "Failed to retrieve books."
     });
   }
 });
 
-// GET: Retrieve one book by MongoDB ID
+// ======================================
+// GET ONE BOOK
+// ======================================
+
 app.get("/books/:id", async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid book ID."
@@ -76,37 +247,33 @@ app.get("/books/:id", async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       book
     });
+
   } catch (error) {
-    res.status(500).json({
+    console.error("Get book error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: "Failed to retrieve book."
     });
   }
 });
 
-// POST: Create a book
-app.post("/books", librarianOnly, async (req, res) => {
+// ======================================
+// ADD A BOOK (PROTECTED)
+// ======================================
+
+app.post("/books", authenticateLibrarian, async (req, res) => {
   try {
     const { title, author, year, genre, available } = req.body;
 
-    if (
-      typeof title !== "string" ||
-      !title.trim() ||
-      typeof author !== "string" ||
-      !author.trim() ||
-      !Number.isInteger(year) ||
-      year < 1 ||
-      typeof genre !== "string" ||
-      !genre.trim() ||
-      (available !== undefined && typeof available !== "boolean")
-    ) {
+    if (!title || !author || !year || !genre) {
       return res.status(400).json({
         success: false,
-        message: "Provide a valid title, author, year, genre, and optional boolean availability."
+        message: "Title, author, year, and genre are required."
       });
     }
 
@@ -115,55 +282,75 @@ app.post("/books", librarianOnly, async (req, res) => {
       author,
       year,
       genre,
-      available
+      available: available === undefined ? true : available
     });
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: "Book created successfully.",
+      message: "Book added successfully.",
       book
     });
+
   } catch (error) {
-    res.status(500).json({
+    console.error("Add book error:", error);
+
+    if (error.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: "Failed to add book."
     });
   }
 });
 
-// PUT: Update a book
-app.put("/books/:id", librarianOnly, async (req, res) => {
+// ======================================
+// UPDATE A BOOK (PROTECTED)
+// ======================================
+
+app.put("/books/:id", authenticateLibrarian, async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid book ID."
       });
     }
 
-    const { title, author, year, genre, available } = req.body;
+    const allowedFields = [
+      "title",
+      "author",
+      "year",
+      "genre",
+      "available"
+    ];
 
-    if (
-      typeof title !== "string" ||
-      !title.trim() ||
-      typeof author !== "string" ||
-      !author.trim() ||
-      !Number.isInteger(year) ||
-      year < 1 ||
-      typeof genre !== "string" ||
-      !genre.trim() ||
-      (available !== undefined && typeof available !== "boolean")
-    ) {
+    const updates = {};
+
+    for (const field of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Provide valid title, author, year, genre, and optional boolean availability."
+        message: "Provide at least one field to update."
       });
     }
 
     const book = await Book.findByIdAndUpdate(
       req.params.id,
-      { title, author, year, genre, available },
-      { new: true, runValidators: true }
+      updates,
+      {
+        new: true,
+        runValidators: true
+      }
     );
 
     if (!book) {
@@ -173,23 +360,36 @@ app.put("/books/:id", librarianOnly, async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Book updated successfully.",
       book
     });
+
   } catch (error) {
-    res.status(500).json({
+    console.error("Update book error:", error);
+
+    if (error.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: "Failed to update book."
     });
   }
 });
 
-// DELETE: Delete a book
-app.delete("/books/:id", librarianOnly, async (req, res) => {
+// ======================================
+// DELETE A BOOK (PROTECTED)
+// ======================================
+
+app.delete("/books/:id", authenticateLibrarian, async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({
         success: false,
         message: "Invalid book ID."
@@ -205,49 +405,75 @@ app.delete("/books/:id", librarianOnly, async (req, res) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: "Book deleted successfully.",
-      book
+      message: "Book deleted successfully."
     });
+
   } catch (error) {
-    res.status(500).json({
+    console.error("Delete book error:", error);
+
+    return res.status(500).json({
       success: false,
-      message: error.message
+      message: "Failed to delete book."
     });
   }
 });
 
-// Handle unknown routes
+// ======================================
+// 404 HANDLER - MUST BE LAST
+// ======================================
+
 app.use((req, res) => {
-  res.status(404).json({
+  return res.status(404).json({
     success: false,
     message: "Route not found."
   });
 });
 
-// General error handler
-app.use((err, req, res, next) => {
-  console.error(err.stack);
+// ======================================
+// GLOBAL ERROR HANDLER
+// ======================================
 
-  res.status(500).json({
+app.use((error, req, res, next) => {
+  console.error("Unexpected error:", error);
+
+  return res.status(500).json({
     success: false,
     message: "Internal server error."
   });
 });
 
-// Connect to MongoDB and start server
-const PORT = process.env.PORT || 3000;
+// ======================================
+// CONNECT DATABASE AND START SERVER
+// ======================================
 
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log("Connected to MongoDB Atlas");
+async function startServer() {
+  try {
+    if (!process.env.MONGODB_URI) {
+      throw new Error("MONGODB_URI is missing from .env");
+    }
 
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+    if (!process.env.JWT_SECRET) {
+      throw new Error("JWT_SECRET is missing from .env");
+    }
+
+    if (!process.env.LIBRARIAN_SETUP_KEY) {
+      throw new Error("LIBRARIAN_SETUP_KEY is missing from .env");
+    }
+
+    await mongoose.connect(process.env.MONGODB_URI);
+
+    console.log("MongoDB connected successfully.");
+
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Bookwise API running at http://localhost:${PORT}`);
     });
-  })
-  .catch((error) => {
-    console.error("MongoDB connection failed:", error.message);
-  });
+
+  } catch (error) {
+    console.error("Server startup failed:", error.message);
+    process.exit(1);
+  }
+}
+
+startServer();
