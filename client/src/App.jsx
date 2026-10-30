@@ -1,6 +1,6 @@
 
 import { useEffect, useState } from "react";
-import Login from "./Login";
+import login from "./login";
 import Register from "./Register";
 import "./App.css";
 
